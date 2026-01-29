@@ -1,6 +1,6 @@
 # WeCom Bridge
 
-企业微信智能机器人到 AI Gateway 的桥接服务。作为企业微信和本地 AI 服务（如 Moltbot Gateway）之间的中间层，实现智能对话功能。
+企业微信智能机器人到 clawdbot 的桥接服务。作为企业微信和本地 clawdbot 服务之间的中间层，实现智能对话功能。
 
 ## 功能特性
 
