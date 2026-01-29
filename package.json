@@ -1,0 +1,31 @@
+{
+  "name": "clawdbot-qw",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@types/form-data": "^2.2.1",
+    "@types/node": "^25.0.10",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.3",
+    "fast-xml-parser": "^5.3.3",
+    "fastify": "^5.7.2",
+    "form-data": "^4.0.5",
+    "ws": "^8.19.0",
+    "wxcrypt": "^1.4.3"
+  }
+}

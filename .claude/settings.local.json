@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:kasata.medium.com)",
+      "Bash(dir:*)",
+      "Bash(powershell:*)",
+      "Bash(cmd /c:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:dev.to)",
+      "WebFetch(domain:zeabur.com)",
+      "Bash(npm init -y)",
+      "Bash(npm install typescript ts-node @types/node -D)",
+      "Bash(npm install fastify ws axios fast-xml-parser dotenv)",
+      "Bash(npm install @types/ws -D)",
+      "Bash(npm install wxcrypt)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run build)",
+      "Bash(npm install form-data)",
+      "Bash(npm install @types/form-data -D)",
+      "Bash(findstr:*)"
+    ]
+  }
+}
