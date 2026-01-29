@@ -4,6 +4,8 @@ import { gatewayClient } from '../../gateway/client';
 import { wecomBotClient } from '../../wecom/bot-client';
 import { sessionManager } from '../../session';
 import { logger } from '../../utils/logger';
+import { config } from '../../config';
+import { StreamProcessor } from '../../stream';
 import type { WeComCallbackQuery, WeComBotMessage } from '../../wecom/types';
 import type { ContentPart } from '../../session/types';
 import axios from 'axios';
@@ -272,26 +274,10 @@ export async function callbackRoutes(fastify: FastifyInstance): Promise<void> {
               contentTypes: multimodalContent.map(p => p.type),
             });
 
-            // 1. 添加用户消息到会话历史
+            // 1. 添加用户消息到本地历史（供后续功能使用）
             await sessionManager.addUserMessage(userId, multimodalContent, chatId);
 
-            // 2. 获取会话历史
-            const sessionHistory = await sessionManager.getSessionHistory(userId, chatId);
-            logger.info('会话历史', {
-              sessionId: chatId ? `${userId}_${chatId}` : userId,
-              messageCount: sessionHistory.length,
-            });
-
-            // 3. 调用 Gateway API (带上下文)
-            const aiReply = await gatewayClient.sendMessageWithContext(
-              sessionHistory.slice(0, -1),
-              multimodalContent
-            );
-
-            // 4. 添加 AI 回复到会话历史
-            await sessionManager.addAssistantMessage(userId, aiReply, chatId);
-
-            // 5. 从 response_url 中提取 response_code 参数
+            // 2. 从 response_url 中提取 response_code 参数
             const url = new URL(responseUrl);
             const responseCode = url.searchParams.get('response_code');
 
@@ -299,8 +285,58 @@ export async function callbackRoutes(fastify: FastifyInstance): Promise<void> {
               throw new Error('response_url 中缺少 response_code 参数');
             }
 
-            // 6. 使用 response_code 发送回复
-            await wecomBotClient.sendResponse(responseCode, aiReply);
+            if (config.stream.enabled) {
+              // 流式模式
+              logger.info('使用流式模式处理消息', { userId, chatId });
+
+              const processor = new StreamProcessor({
+                responseCode,
+                config: {
+                  minChunkSize: config.stream.minChunkSize,
+                  maxChunkSize: config.stream.maxChunkSize,
+                  sendInterval: config.stream.sendInterval,
+                  maxContentLength: 20480,
+                },
+                onSend: async (streamId, content, finish) => {
+                  await wecomBotClient.sendStreamResponse(responseCode, streamId, content, finish);
+                },
+                onError: async (error) => {
+                  logger.error('流式发送失败', { error: String(error) });
+                },
+              });
+
+              const fullContent = await gatewayClient.sendMessageStream(
+                multimodalContent,
+                userId,
+                chatId,
+                async (delta, isComplete) => {
+                  if (isComplete) {
+                    await processor.finish();
+                  } else {
+                    await processor.handleDelta(delta);
+                  }
+                }
+              );
+
+              // 3. 添加 AI 回复到本地历史
+              await sessionManager.addAssistantMessage(userId, fullContent, chatId);
+
+            } else {
+              // 非流式模式 (保留现有逻辑作为回退)
+              logger.info('使用非流式模式处理消息', { userId, chatId });
+
+              const aiReply = await gatewayClient.sendMessageWithContext(
+                multimodalContent,
+                userId,
+                chatId
+              );
+
+              // 3. 添加 AI 回复到本地历史
+              await sessionManager.addAssistantMessage(userId, aiReply, chatId);
+
+              // 4. 使用 response_code 发送回复
+              await wecomBotClient.sendResponse(responseCode, aiReply);
+            }
 
             logger.info('消息处理完成', { userId, chatId });
           } catch (error) {

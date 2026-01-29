@@ -30,6 +30,13 @@ export const config = {
   server: {
     port: parseInt(process.env['SERVER_PORT'] || '3000', 10),
   },
+  stream: {
+    enabled: process.env['STREAM_ENABLED'] !== 'false',  // 默认开启
+    minChunkSize: parseInt(process.env['STREAM_MIN_CHUNK_SIZE'] || '20', 10),
+    maxChunkSize: parseInt(process.env['STREAM_MAX_CHUNK_SIZE'] || '500', 10),
+    sendInterval: parseInt(process.env['STREAM_SEND_INTERVAL'] || '300', 10),
+    timeout: parseInt(process.env['STREAM_TIMEOUT'] || '60000', 10),
+  },
 };
 
 // 在服务启动时打印配置信息（脱敏）

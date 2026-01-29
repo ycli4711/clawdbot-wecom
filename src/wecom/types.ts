@@ -99,3 +99,16 @@ export interface WeComApiResponse {
   errcode: number;
   errmsg: string;
 }
+
+// 企业微信流式消息格式
+export interface WeComStreamMessage {
+  msgtype: 'stream';
+  stream: {
+    id: string;           // 流唯一ID，首次生成后保持不变
+    finish: boolean;      // 是否结束
+    content: string;      // 累积内容 (最长 20480 字节)
+    feedback?: {
+      id: string;
+    };
+  };
+}
