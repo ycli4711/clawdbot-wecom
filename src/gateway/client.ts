@@ -1,139 +1,155 @@
-import WebSocket from 'ws';
+import axios, { AxiosInstance } from 'axios';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import { wecomClient } from '../wecom/client';
+import type { Message, MessageContent, ContentPart } from '../session/types';
 
-type MessageHandler = (userId: string, content: string) => void;
+interface GatewayMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: MessageContent;  // 支持多模态
+}
+
+interface GatewayRequest {
+  model: string;
+  messages: GatewayMessage[];
+  stream: false;
+}
+
+interface GatewayResponse {
+  id: string;
+  object: 'chat.completion';
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    message: {
+      role: 'assistant';
+      content: string;
+    };
+    finish_reason: string;
+  }>;
+}
 
 class GatewayClient {
-  private ws: WebSocket | null = null;
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
-  private reconnectDelay = 5000;
-  private pendingRequests: Map<string, { userId: string; resolve: () => void }> = new Map();
-  private onMessageCallback: MessageHandler | null = null;
+  private client: AxiosInstance;
+  private baseUrl: string;
+  private model: string;
 
-  private generateRequestId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+  constructor() {
+    this.baseUrl = config.gateway.baseUrl;
+    this.model = config.gateway.model;
+
+    this.client = axios.create({
+      baseURL: this.baseUrl,
+      timeout: config.gateway.timeout,
+      headers: {
+        'Authorization': `Bearer ${config.gateway.authToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    logger.info('Gateway HTTP 客户端已初始化', {
+      baseUrl: this.baseUrl,
+      model: this.model
+    });
   }
 
-  connect(): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      return;
-    }
+  /**
+   * 发送带上下文的消息到 Gateway
+   * @param sessionHistory 会话历史
+   * @param newMessage 新消息 (支持多模态)
+   */
+  async sendMessageWithContext(
+    sessionHistory: Message[],
+    newMessage: MessageContent
+  ): Promise<string> {
+    try {
+      // 构建完整的消息数组
+      const messages: GatewayMessage[] = [
+        ...sessionHistory.map(m => ({
+          role: m.role,
+          content: m.content,
+        })),
+        {
+          role: 'user' as const,
+          content: newMessage,
+        },
+      ];
 
-    logger.info('正在连接 Gateway', { url: config.gateway.wsUrl });
+      logger.debug('发送消息到 Gateway', {
+        messageCount: messages.length,
+        newMessageType: typeof newMessage === 'string' ? 'text' : 'multimodal',
+        newMessageParts: Array.isArray(newMessage) ? newMessage.length : undefined,
+      });
 
-    this.ws = new WebSocket(config.gateway.wsUrl);
-
-    this.ws.on('open', () => {
-      logger.info('Gateway 连接成功，发送握手消息');
-
-      // 发送握手消息
-      const connectMsg = {
-        type: 'req',
-        id: this.generateRequestId(),
-        method: 'connect',
-        params: {
-          minProtocol: 3,
-          maxProtocol: 3,
-          auth: { token: config.gateway.authToken },
-          client: {
-            id: 'wecom-bridge',
-            mode: 'api',
-            platform: 'linux',
-            version: '1.0.0',
-          }
-        }
+      const requestBody: GatewayRequest = {
+        model: this.model,
+        messages,
+        stream: false,
       };
 
-      this.ws!.send(JSON.stringify(connectMsg));
-      this.reconnectAttempts = 0;
-    });
-
-    this.ws.on('message', (data) => {
-      this.handleMessage(data.toString());
-    });
-
-    this.ws.on('close', () => {
-      logger.warn('Gateway 连接断开');
-      this.scheduleReconnect();
-    });
-
-    this.ws.on('error', (error) => {
-      logger.error('Gateway 连接错误', { error: error.message });
-    });
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      logger.error('达到最大重连次数，停止重连');
-      return;
-    }
-
-    this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.min(this.reconnectAttempts, 5);
-    logger.info(`${delay / 1000} 秒后尝试重连`, { attempt: this.reconnectAttempts });
-
-    setTimeout(() => this.connect(), delay);
-  }
-
-  private async handleMessage(rawData: string): Promise<void> {
-    try {
-      const message = JSON.parse(rawData);
-      logger.debug('收到 Gateway 消息', { type: message.type, method: message.method, data: rawData });
-
-      // 处理握手响应
-      if (message.type === 'res' && message.method === 'connect') {
-        if (message.error) {
-          logger.error('Gateway 握手失败', { error: message.error, fullMessage: rawData });
-        } else {
-          logger.info('Gateway 握手成功', { result: message.result });
+      logger.debug('发送请求详情', {
+        url: `${this.baseUrl}/v1/chat/completions`,
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ***',
+          'Content-Type': 'application/json',
+        },
+        bodyPreview: {
+          model: this.model,
+          messageCount: messages.length,
+          stream: false,
         }
-        return;
+      });
+
+      // 打印完整请求体用于调试
+      logger.info('Gateway完整请求体', {
+        fullRequest: JSON.stringify(requestBody, null, 2)
+      });
+
+      const response = await this.client.post<GatewayResponse>(
+        '/v1/chat/completions',
+        requestBody
+      );
+
+      const reply = response.data.choices[0]?.message?.content;
+
+      if (!reply) {
+        throw new Error('Gateway 响应格式错误：缺少 content');
       }
 
-      // 处理来自 Moltbot 的回复
-      if (message.type === 'response' && message.userId && message.content) {
-        await wecomClient.sendTextMessage(message.userId, message.content);
-      }
+      logger.debug('收到 Gateway 响应', {
+        replyLength: reply.length,
+        model: response.data.model
+      });
+
+      return reply;
+
     } catch (error) {
-      logger.error('处理 Gateway 消息失败', { error: String(error) });
-    }
-  }
-
-  async sendMessage(userId: string, content: string): Promise<void> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Gateway 未连接');
-    }
-
-    const message = {
-      type: 'req',
-      id: this.generateRequestId(),
-      method: 'message',
-      params: {
-        userId,
-        content,
-        timestamp: Date.now(),
+      if (axios.isAxiosError(error)) {
+        logger.error('Gateway API 调用失败', {
+          url: error.config?.url,
+          method: error.config?.method,
+          baseURL: error.config?.baseURL,
+          fullUrl: `${error.config?.baseURL}${error.config?.url}`,
+          status: error.response?.status,
+          statusText: error.response?.statusText,
+          message: error.message,
+          responseData: error.response?.data,
+          responseHeaders: error.response?.headers,
+        });
+      } else {
+        logger.error('Gateway 处理失败', { error: String(error) });
       }
-    };
-
-    this.ws.send(JSON.stringify(message));
-    logger.debug('消息已发送到 Gateway', { userId });
+      throw error;
+    }
   }
 
-  onMessage(handler: MessageHandler): void {
-    this.onMessageCallback = handler;
-  }
-
-  isConnected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
-  }
-
-  disconnect(): void {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+  async healthCheck(): Promise<boolean> {
+    try {
+      const response = await this.client.get('/health', { timeout: 5000 });
+      return response.status === 200;
+    } catch {
+      return false;
     }
   }
 }

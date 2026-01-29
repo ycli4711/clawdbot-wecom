@@ -1,0 +1,37 @@
+# 依赖
+node_modules/
+
+# 编译产物
+dist/
+
+# 环境变量（包含敏感信息）
+.env
+.env.local
+.env.*.local
+
+# 日志
+logs/
+*.log
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+nul
+
+# Claude Code 本地设置
+.claude/settings.local.json
+
+# 测试覆盖率
+coverage/
+
+# 临时文件
+tmp/
+temp/
+*.tmp

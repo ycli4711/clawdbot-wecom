@@ -20,12 +20,12 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@wecom/crypto": "^1.0.1",
     "axios": "^1.13.4",
     "dotenv": "^17.2.3",
     "fast-xml-parser": "^5.3.3",
     "fastify": "^5.7.2",
     "form-data": "^4.0.5",
-    "ws": "^8.19.0",
-    "wxcrypt": "^1.4.3"
+    "ws": "^8.19.0"
   }
 }

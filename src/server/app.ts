@@ -8,13 +8,17 @@ export async function createServer() {
     logger: false,
   });
 
-  // 注册原始 body 解析器（企业微信发送的是 XML）
-  fastify.addContentTypeParser('application/xml', { parseAs: 'string' }, (req, body, done) => {
-    done(null, body);
-  });
-
-  fastify.addContentTypeParser('text/xml', { parseAs: 'string' }, (req, body, done) => {
-    done(null, body);
+  // 智能机器人使用 JSON 格式，需要注册 JSON 解析器
+  // 但企业微信可能不设置 Content-Type，所以需要处理纯文本
+  fastify.addContentTypeParser('text/plain', { parseAs: 'string' }, (req, body, done) => {
+    // 尝试解析为 JSON
+    try {
+      const parsed = JSON.parse(body as string);
+      done(null, parsed);
+    } catch {
+      // 如果不是 JSON，返回原始字符串
+      done(null, body);
+    }
   });
 
   // 注册路由
