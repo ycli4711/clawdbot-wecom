@@ -1,7 +1,7 @@
 import { getSignature, decrypt, encrypt } from '@wecom/crypto';
 import { config } from '../config';
 import { logger } from '../utils/logger';
-import type { WeComBotMessage } from './types';
+import type { WeComBotMessage, WeComStreamMessage } from './types';
 
 /**
  * 验证 URL (GET 请求)
@@ -121,6 +121,55 @@ export function decryptBotMessage(
     return parsed;
   } catch (error) {
     logger.error('消息解密失败', {
+      error: String(error),
+      errorStack: error instanceof Error ? error.stack : undefined,
+    });
+    throw error;
+  }
+}
+
+/**
+ * 加密被动回复消息
+ * 用于流式消息被动回复
+ */
+export function encryptReply(message: WeComStreamMessage): string {
+  try {
+    const messageJson = JSON.stringify(message);
+
+    logger.debug('加密被动回复消息', {
+      msgtype: message.msgtype,
+      streamId: message.stream?.id,
+      finish: message.stream?.finish,
+      contentLength: message.stream?.content?.length,
+    });
+
+    // 生成时间戳和随机串
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const nonce = Math.random().toString(36).substring(2, 15);
+
+    // 使用企业微信加密库加密
+    const encryptedMsg = encrypt(
+      config.wecom.encodingAESKey,
+      messageJson,
+      config.wecom.corpId
+    );
+
+    // 计算签名
+    const signature = getSignature(config.wecom.token, timestamp, nonce, encryptedMsg);
+
+    // 返回加密后的 JSON 格式
+    const response = JSON.stringify({
+      encrypt: encryptedMsg,
+      msgsignature: signature,
+      timestamp,
+      nonce,
+    });
+
+    logger.debug('被动回复消息加密成功', { responseLength: response.length });
+
+    return response;
+  } catch (error) {
+    logger.error('被动回复消息加密失败', {
       error: String(error),
       errorStack: error instanceof Error ? error.stack : undefined,
     });

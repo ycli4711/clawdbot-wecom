@@ -1,2 +1,3 @@
 export { StreamProcessor } from './processor';
-export type { StreamConfig, StreamProcessorOptions } from './types';
+export { streamSessionManager } from './session-manager';
+export type { StreamConfig, StreamProcessorOptions, StreamSession } from './types';

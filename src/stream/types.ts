@@ -11,3 +11,15 @@ export interface StreamProcessorOptions {
   onSend: (streamId: string, content: string, finish: boolean) => Promise<void>;
   onError: (error: Error) => Promise<void>;
 }
+
+// 被动回复流式会话状态
+export interface StreamSession {
+  streamId: string;
+  userId: string;
+  chatId?: string;
+  content: string;          // 累积内容
+  isComplete: boolean;      // 是否完成
+  error?: string;           // 错误信息
+  createdAt: number;
+  updatedAt: number;
+}

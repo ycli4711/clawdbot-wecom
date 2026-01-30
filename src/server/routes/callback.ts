@@ -1,12 +1,13 @@
 import { FastifyInstance } from 'fastify';
-import { verifyUrl, decryptBotMessage } from '../../wecom/bot-crypto';
+import { verifyUrl, decryptBotMessage, encryptReply } from '../../wecom/bot-crypto';
 import { gatewayClient } from '../../gateway/client';
 import { wecomBotClient } from '../../wecom/bot-client';
 import { sessionManager } from '../../session';
+import { streamSessionManager } from '../../stream';
 import { logger } from '../../utils/logger';
 import { config } from '../../config';
-import { StreamProcessor } from '../../stream';
-import type { WeComCallbackQuery, WeComBotMessage } from '../../wecom/types';
+import { formatMarkdownForWecom } from '../../utils/markdown-formatter';
+import type { WeComCallbackQuery, WeComBotMessage, WeComStreamMessage } from '../../wecom/types';
 import type { ContentPart } from '../../session/types';
 import axios from 'axios';
 
@@ -104,7 +105,7 @@ async function extractMultimodalContent(message: WeComBotMessage): Promise<Conte
 
       if (mixedData.msg_item && Array.isArray(mixedData.msg_item)) {
         for (const item of mixedData.msg_item) {
-          // 提取文本部分
+          // 提取文���部分
           if (item.msgtype === 'text' && item.text?.content) {
             parts.push({
               type: 'text',
@@ -134,33 +135,67 @@ async function extractMultimodalContent(message: WeComBotMessage): Promise<Conte
   return parts.length > 0 ? parts : null;
 }
 
-function extractTextContent(message: WeComBotMessage): string | null {
-  if (message.msgtype === 'text' && message.text?.content) {
-    return message.text.content;
-  }
+/**
+ * 构建流式消息响应
+ */
+function buildStreamResponse(streamId: string, content: string, finish: boolean): WeComStreamMessage {
+  return {
+    msgtype: 'stream',
+    stream: {
+      id: streamId,
+      finish,
+      content: formatMarkdownForWecom(content),
+    },
+  };
+}
 
-  if (message.msgtype === 'mixed' && message.mixed) {
+/**
+ * 判断是否是流式刷新事件
+ * 根据企业微信文档，刷新事件会包含 stream 相关信息
+ */
+function isStreamRefreshEvent(message: WeComBotMessage): boolean {
+  // 检查消息是否包含 stream 字段（刷新事件的特征）
+  return (message as any).stream?.id !== undefined;
+}
+
+/**
+ * 启动 Gateway 流式请求（异步）
+ */
+function startGatewayStream(
+  streamId: string,
+  content: ContentPart[],
+  userId: string,
+  chatId?: string
+): void {
+  // 异步执行，不阻塞回调响应
+  (async () => {
     try {
-      // mixed 可能是 JSON 字符串,需要先解析
-      const mixedData = typeof message.mixed === 'string'
-        ? JSON.parse(message.mixed)
-        : message.mixed;
+      logger.info('开始 Gateway 流式请求', { streamId, userId, chatId });
 
-      if (mixedData.msg_item && Array.isArray(mixedData.msg_item)) {
-        const textParts = mixedData.msg_item
-          .filter((item: any) => item.msgtype === 'text' && item.text?.content)
-          .map((item: any) => item.text.content);
-
-        if (textParts.length > 0) {
-          return textParts.join('\n');
+      await gatewayClient.sendMessageStream(
+        content,
+        userId,
+        chatId,
+        async (delta, isComplete) => {
+          if (isComplete) {
+            streamSessionManager.markComplete(streamId);
+          } else if (delta) {
+            streamSessionManager.appendContent(streamId, delta);
+          }
         }
+      );
+
+      // 获取完整内容保存到会话历史
+      const session = streamSessionManager.getSession(streamId);
+      if (session) {
+        await sessionManager.addAssistantMessage(userId, session.content, chatId);
+        logger.info('Gateway 流式请求完成', { streamId, contentLength: session.content.length });
       }
     } catch (error) {
-      logger.error('解析 mixed 消息失败', { error: String(error) });
+      logger.error('Gateway 流式请求失败', { streamId, error: String(error) });
+      streamSessionManager.markError(streamId, String(error));
     }
-  }
-
-  return null;
+  })();
 }
 
 export async function callbackRoutes(fastify: FastifyInstance): Promise<void> {
@@ -227,103 +262,122 @@ export async function callbackRoutes(fastify: FastifyInstance): Promise<void> {
         chatid: message.chatid,
       });
 
-      // 打印完整消息结构用于调试
-      if (message.msgtype === 'mixed') {
-        logger.info('Mixed消息完整结构', {
-          mixed: JSON.stringify(message.mixed, null, 2)
-        });
+      const userId = message.from?.userid;
+      const chatId = message.chatid;
+
+      if (!userId) {
+        logger.warn('消息缺少发送者信息');
+        return reply.send('');
       }
 
-      // 打印所有消息的完整结构
-      logger.info('完整消息结构', {
-        msgtype: message.msgtype,
-        fullMessage: JSON.stringify(message, null, 2)
-      });
+      // ========== 流式模式处理 ==========
+      if (config.stream.enabled) {
+        // 检查是否是流式刷新事件
+        const existingSession = streamSessionManager.getSessionByUser(userId, chatId);
 
-      // 提取多模态内容（异步，因为需要下载图片）
-      const multimodalContent = await extractMultimodalContent(message);
+        if (existingSession && !existingSession.isComplete && isStreamRefreshEvent(message)) {
+          // 这是流式刷新事件，返回当前累积内容
+          logger.debug('处理流式刷新事件', {
+            streamId: existingSession.streamId,
+            contentLength: existingSession.content.length,
+            isComplete: existingSession.isComplete,
+          });
 
-      logger.debug('extractMultimodalContent结果', {
-        msgtype: message.msgtype,
-        contentParts: multimodalContent?.length,
-        contentTypes: multimodalContent?.map(p => p.type),
-        hasResponseUrl: !!message.response_url
-      });
+          const streamResponse = buildStreamResponse(
+            existingSession.streamId,
+            existingSession.content,
+            existingSession.isComplete
+          );
 
-      if (multimodalContent && message.response_url) {
-        const userId = message.from.userid;
-        const chatId = message.chatid;
-        const responseUrl = message.response_url;
+          // 如果会话已完成，清理会话
+          if (existingSession.isComplete) {
+            // 延迟清理，确保最后一次响应发送成功
+            setTimeout(() => {
+              streamSessionManager.removeSession(existingSession.streamId);
+            }, 5000);
+          }
 
-        logger.info('提取到消息内容', {
-          msgtype: message.msgtype,
-          contentParts: multimodalContent.length,
-          contentTypes: multimodalContent.map(p => p.type),
-        });
+          const encryptedResponse = encryptReply(streamResponse);
+          return reply
+            .type('application/json; charset=utf-8')
+            .send(encryptedResponse);
+        }
 
-        // 智能机器人要求在1秒内响应，所以立即返回空包
-        reply.send('');
+        // 检查是否有已完成但未清理的会话需要响应
+        if (existingSession && existingSession.isComplete) {
+          // 返回最终完成响应
+          const streamResponse = buildStreamResponse(
+            existingSession.streamId,
+            existingSession.content,
+            true
+          );
 
-        // 异步处理 AI 响应
-        (async () => {
-          try {
-            logger.info('开始处理用户消息', {
-              userId,
-              chatId,
-              contentParts: multimodalContent.length,
-              contentTypes: multimodalContent.map(p => p.type),
-            });
+          // 清理会话
+          setTimeout(() => {
+            streamSessionManager.removeSession(existingSession.streamId);
+          }, 5000);
 
-            // 1. 添加用户消息到本地历史（供后续功能使用）
-            await sessionManager.addUserMessage(userId, multimodalContent, chatId);
+          const encryptedResponse = encryptReply(streamResponse);
+          return reply
+            .type('application/json; charset=utf-8')
+            .send(encryptedResponse);
+        }
 
-            // 2. 从 response_url 中提取 response_code 参数
-            const url = new URL(responseUrl);
-            const responseCode = url.searchParams.get('response_code');
+        // 这是新用户消息，开始流式处理
+        const multimodalContent = await extractMultimodalContent(message);
 
-            if (!responseCode) {
-              throw new Error('response_url 中缺少 response_code 参数');
-            }
+        if (multimodalContent) {
+          logger.info('开始处理用户消息（被动流式模式）', {
+            userId,
+            chatId,
+            contentParts: multimodalContent.length,
+            contentTypes: multimodalContent.map(p => p.type),
+          });
 
-            if (config.stream.enabled) {
-              // 流式模式
-              logger.info('使用流式模式处理消息', { userId, chatId });
+          // 1. 添加用户消息到本地历史
+          await sessionManager.addUserMessage(userId, multimodalContent, chatId);
 
-              const processor = new StreamProcessor({
-                responseCode,
-                config: {
-                  minChunkSize: config.stream.minChunkSize,
-                  maxChunkSize: config.stream.maxChunkSize,
-                  sendInterval: config.stream.sendInterval,
-                  maxContentLength: 20480,
-                },
-                onSend: async (streamId, content, finish) => {
-                  await wecomBotClient.sendStreamResponse(responseCode, streamId, content, finish);
-                },
-                onError: async (error) => {
-                  logger.error('流式发送失败', { error: String(error) });
-                },
-              });
+          // 2. 创建流式会话
+          const streamId = streamSessionManager.createSession(userId, chatId);
 
-              const fullContent = await gatewayClient.sendMessageStream(
-                multimodalContent,
-                userId,
-                chatId,
-                async (delta, isComplete) => {
-                  if (isComplete) {
-                    await processor.finish();
-                  } else {
-                    await processor.handleDelta(delta);
-                  }
-                }
-              );
+          // 3. 异步启动 Gateway 流式请求
+          startGatewayStream(streamId, multimodalContent, userId, chatId);
 
-              // 3. 添加 AI 回复到本地历史
-              await sessionManager.addAssistantMessage(userId, fullContent, chatId);
+          // 4. 立即返回初始流式响应（空内容，表示开始处理）
+          const streamResponse = buildStreamResponse(streamId, '', false);
+          const encryptedResponse = encryptReply(streamResponse);
 
-            } else {
-              // 非流式模式 (保留现有逻辑作为回退)
-              logger.info('使用非流式模式处理消息', { userId, chatId });
+          logger.debug('返回初始流式响应', { streamId });
+
+          return reply
+            .type('application/json; charset=utf-8')
+            .send(encryptedResponse);
+        }
+      } else {
+        // ========== 非流式模式处理 ==========
+        const multimodalContent = await extractMultimodalContent(message);
+
+        if (multimodalContent && message.response_url) {
+          logger.info('开始处理用户消息（主动回复模式）', {
+            userId,
+            chatId,
+            contentParts: multimodalContent.length,
+          });
+
+          // 立即返回空响应
+          reply.send('');
+
+          // 异步处理
+          (async () => {
+            try {
+              await sessionManager.addUserMessage(userId, multimodalContent, chatId);
+
+              const url = new URL(message.response_url);
+              const responseCode = url.searchParams.get('response_code');
+
+              if (!responseCode) {
+                throw new Error('response_url 中缺少 response_code 参数');
+              }
 
               const aiReply = await gatewayClient.sendMessageWithContext(
                 multimodalContent,
@@ -331,31 +385,27 @@ export async function callbackRoutes(fastify: FastifyInstance): Promise<void> {
                 chatId
               );
 
-              // 3. 添加 AI 回复到本地历史
               await sessionManager.addAssistantMessage(userId, aiReply, chatId);
-
-              // 4. 使用 response_code 发送回复
               await wecomBotClient.sendResponse(responseCode, aiReply);
-            }
 
-            logger.info('消息处理完成', { userId, chatId });
-          } catch (error) {
-            logger.error('异步处理消息失败', { userId, chatId, error: String(error) });
+              logger.info('消息处理完成', { userId, chatId });
+            } catch (error) {
+              logger.error('异步处理消息失败', { userId, chatId, error: String(error) });
 
-            // 发送错误提示
-            try {
-              const url = new URL(responseUrl);
-              const responseCode = url.searchParams.get('response_code');
-              if (responseCode) {
-                await wecomBotClient.sendResponse(responseCode, '抱歉，服务暂时不可用，请稍后再试。');
+              try {
+                const url = new URL(message.response_url);
+                const responseCode = url.searchParams.get('response_code');
+                if (responseCode) {
+                  await wecomBotClient.sendResponse(responseCode, '抱歉，服务暂时不可用，请稍后再试。');
+                }
+              } catch (sendError) {
+                logger.error('发送错误提示失败', { error: String(sendError) });
               }
-            } catch (sendError) {
-              logger.error('发送错误提示失败', { error: String(sendError) });
             }
-          }
-        })();
+          })();
 
-        return;
+          return;
+        }
       }
 
       // 返回空响应
