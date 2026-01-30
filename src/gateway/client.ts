@@ -118,6 +118,17 @@ class GatewayClient {
         ),
       });
 
+      // 输出完整请求体（包含完整 base64）
+      logger.debug('Gateway完整请求体', {
+        requestBody: JSON.stringify(requestBody, null, 2)
+      });
+
+      // 写入文件（避免日志被截断）
+      const fs = require('fs');
+      const debugFilePath = `./debug-gateway-request-${Date.now()}.json`;
+      fs.writeFileSync(debugFilePath, JSON.stringify(requestBody, null, 2), 'utf-8');
+      logger.info('Gateway 完整请求体已写入文件', { file: debugFilePath });
+
       const response = await this.client.post<GatewayResponse>(
         '/v1/chat/completions',
         requestBody
@@ -199,6 +210,12 @@ class GatewayClient {
       user: sessionId,
       stream: true,
     };
+
+    // 写入文件（流式模式）
+    const fs = require('fs');
+    const debugFilePath = `./debug-gateway-stream-request-${Date.now()}.json`;
+    fs.writeFileSync(debugFilePath, JSON.stringify(requestBody, null, 2), 'utf-8');
+    logger.info('Gateway 流式请求体已写入文件', { file: debugFilePath });
 
     try {
       const response = await axios.post(
